@@ -109,6 +109,9 @@ class ArticlesQueriesMixin:
     async def get_articles_for_feed(
         self, conn: Connection, *, follower_username: str, limit: int, offset: int
     ) -> Record: ...
+    async def get_articles_for_feed_count(
+        self, conn: Connection, *, follower_username: str
+    ) -> Record: ...
 
 class Queries(
     TagsQueriesMixin,

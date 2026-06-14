@@ -573,3 +573,181 @@ async def test_filtering_with_limit_and_offset(
 
     articles_from_response = ListOfArticlesInResponse(**response.json())
     assert full_articles.articles[3:] == articles_from_response.articles
+
+
+@pytest.mark.parametrize(
+    "limit, offset, expected_page_size",
+    ((2, 0, 2), (2, 6, 1), (20, 0, 7)),
+)
+async def test_listing_articles_count_is_total_regardless_of_pagination(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+    limit: int,
+    offset: int,
+    expected_page_size: int,
+) -> None:
+    total_articles = 7
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        for i in range(total_articles):
+            await articles_repo.create_article(
+                slug=f"slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"limit": limit, "offset": offset},
+    )
+
+    articles = ListOfArticlesInResponse(**response.json())
+    assert len(articles.articles) == expected_page_size
+    assert articles.articles_count == total_articles
+
+
+async def test_filtered_articles_count_is_total_with_pagination(
+    app: FastAPI, authorized_client: AsyncClient, test_user: UserInDB, pool: Pool
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        author = await users_repo.create_user(
+            username="prolific", email="prolific@email.com", password="password"
+        )
+
+        for i in range(5):
+            await articles_repo.create_article(
+                slug=f"by-author-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=author,
+            )
+
+        for i in range(3):
+            await articles_repo.create_article(
+                slug=f"by-other-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"author": "prolific", "limit": 2, "offset": 0},
+    )
+
+    articles = ListOfArticlesInResponse(**response.json())
+    assert len(articles.articles) == 2
+    assert articles.articles_count == 5
+
+
+async def test_feed_articles_count_is_total_with_pagination(
+    app: FastAPI, authorized_client: AsyncClient, test_user: UserInDB, pool: Pool
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        profiles_repo = ProfilesRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        followed = await users_repo.create_user(
+            username="followed", email="followed@email.com", password="password"
+        )
+        await profiles_repo.add_user_into_followers(
+            target_user=followed, requested_user=test_user
+        )
+
+        for i in range(5):
+            await articles_repo.create_article(
+                slug=f"feed-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=followed,
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-user-feed-articles"),
+        params={"limit": 2, "offset": 0},
+    )
+
+    articles = ListOfArticlesInResponse(**response.json())
+    assert len(articles.articles) == 2
+    assert articles.articles_count == 5
+
+
+async def test_updating_article_title_changes_slug_link(
+    app: FastAPI, authorized_client: AsyncClient, test_article: Article
+) -> None:
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug=test_article.slug),
+        json={"article": {"title": "Brand New Title"}},
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    updated_article = ArticleInResponse(**response.json()).article
+    assert updated_article.slug == "brand-new-title"
+
+    old_slug_response = await authorized_client.get(
+        app.url_path_for("articles:get-article", slug=test_article.slug)
+    )
+    assert old_slug_response.status_code == status.HTTP_404_NOT_FOUND
+
+    new_slug_response = await authorized_client.get(
+        app.url_path_for("articles:get-article", slug="brand-new-title")
+    )
+    assert new_slug_response.status_code == status.HTTP_200_OK
+
+
+async def test_updating_title_to_conflicting_slug_returns_400_and_keeps_data(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_article: Article,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+        await articles_repo.create_article(
+            slug="other-slug",
+            title="Other",
+            description="other description",
+            body="other body",
+            author=test_user,
+        )
+
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug="other-slug"),
+        json={"article": {"title": test_article.title}},
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    untouched_response = await authorized_client.get(
+        app.url_path_for("articles:get-article", slug="other-slug")
+    )
+    assert untouched_response.status_code == status.HTTP_200_OK
+
+    untouched_article = ArticleInResponse(**untouched_response.json()).article
+    assert untouched_article.title == "Other"
+    assert untouched_article.body == "other body"
+
+
+async def test_updating_title_to_same_slug_is_allowed(
+    app: FastAPI, authorized_client: AsyncClient, test_article: Article
+) -> None:
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug=test_article.slug),
+        json={"article": {"title": test_article.title}},
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    article = ArticleInResponse(**response.json()).article
+    assert article.slug == test_article.slug

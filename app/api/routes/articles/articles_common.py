@@ -35,12 +35,13 @@ async def get_articles_for_user_feed(
         limit=limit,
         offset=offset,
     )
+    articles_count = await articles_repo.get_articles_for_user_feed_count(user=user)
     articles_for_response = [
         ArticleForResponse(**article.dict()) for article in articles
     ]
     return ListOfArticlesInResponse(
         articles=articles_for_response,
-        articles_count=len(articles),
+        articles_count=articles_count,
     )
 
 

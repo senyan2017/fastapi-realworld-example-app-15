@@ -1,9 +1,11 @@
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
-from asyncpg import Connection, Record
+from asyncpg import Connection, Record, UniqueViolationError
 from pypika import Query
+from pypika.functions import Count
+from pypika.queries import QueryBuilder
 
-from app.db.errors import EntityDoesNotExist
+from app.db.errors import EntityAlreadyExists, EntityDoesNotExist
 from app.db.queries.queries import queries
 from app.db.queries.tables import (
     Parameter,
@@ -77,16 +79,21 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
         updated_article.body = body or article.body
         updated_article.description = description or article.description
 
-        async with self.connection.transaction():
-            updated_article.updated_at = await queries.update_article(
-                self.connection,
-                slug=article.slug,
-                author_username=article.author.username,
-                new_slug=updated_article.slug,
-                new_title=updated_article.title,
-                new_body=updated_article.body,
-                new_description=updated_article.description,
-            )
+        try:
+            async with self.connection.transaction():
+                updated_article.updated_at = await queries.update_article(
+                    self.connection,
+                    slug=article.slug,
+                    author_username=article.author.username,
+                    new_slug=updated_article.slug,
+                    new_title=updated_article.title,
+                    new_body=updated_article.body,
+                    new_description=updated_article.description,
+                )
+        except UniqueViolationError as existing_article:
+            raise EntityAlreadyExists(
+                "article with slug {0} already exists".format(updated_article.slug),
+            ) from existing_article
 
         return updated_article
 
@@ -108,13 +115,14 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
         offset: int = 0,
         requested_user: Optional[User] = None,
     ) -> List[Article]:
-        query_params: List[Union[str, int]] = []
-        query_params_count = 0
+        query, query_params, query_params_count = self._build_articles_filters_query(
+            tag=tag,
+            author=author,
+            favorited=favorited,
+        )
 
         # fmt: off
-        query = Query.from_(
-            articles,
-        ).select(
+        query = query.select(
             articles.id,
             articles.slug,
             articles.title,
@@ -133,6 +141,139 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             ),
         )
         # fmt: on
+
+        query = query.limit(Parameter(query_params_count + 1)).offset(
+            Parameter(query_params_count + 2),
+        )
+        query_params.extend([limit, offset])
+
+        articles_rows = await self.connection.fetch(query.get_sql(), *query_params)
+
+        return [
+            await self._get_article_from_db_record(
+                article_row=article_row,
+                slug=article_row[SLUG_ALIAS],
+                author_username=article_row[AUTHOR_USERNAME_ALIAS],
+                requested_user=requested_user,
+            )
+            for article_row in articles_rows
+        ]
+
+    async def count_filtered_articles(
+        self,
+        *,
+        tag: Optional[str] = None,
+        author: Optional[str] = None,
+        favorited: Optional[str] = None,
+    ) -> int:
+        query, query_params, _ = self._build_articles_filters_query(
+            tag=tag,
+            author=author,
+            favorited=favorited,
+        )
+        query = query.select(Count(articles.id).as_("articles_count"))
+
+        count_row = await self.connection.fetchrow(query.get_sql(), *query_params)
+        return count_row["articles_count"]
+
+    async def get_articles_for_user_feed(
+        self,
+        *,
+        user: User,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Article]:
+        articles_rows = await queries.get_articles_for_feed(
+            self.connection,
+            follower_username=user.username,
+            limit=limit,
+            offset=offset,
+        )
+        return [
+            await self._get_article_from_db_record(
+                article_row=article_row,
+                slug=article_row[SLUG_ALIAS],
+                author_username=article_row[AUTHOR_USERNAME_ALIAS],
+                requested_user=user,
+            )
+            for article_row in articles_rows
+        ]
+
+    async def get_articles_for_user_feed_count(self, *, user: User) -> int:
+        feed_count_row = await queries.get_articles_for_feed_count(
+            self.connection,
+            follower_username=user.username,
+        )
+        return feed_count_row["articles_count"]
+
+    async def get_article_by_slug(
+        self,
+        *,
+        slug: str,
+        requested_user: Optional[User] = None,
+    ) -> Article:
+        article_row = await queries.get_article_by_slug(self.connection, slug=slug)
+        if article_row:
+            return await self._get_article_from_db_record(
+                article_row=article_row,
+                slug=article_row[SLUG_ALIAS],
+                author_username=article_row[AUTHOR_USERNAME_ALIAS],
+                requested_user=requested_user,
+            )
+
+        raise EntityDoesNotExist("article with slug {0} does not exist".format(slug))
+
+    async def get_tags_for_article_by_slug(self, *, slug: str) -> List[str]:
+        tag_rows = await queries.get_tags_for_article_by_slug(
+            self.connection,
+            slug=slug,
+        )
+        return [row["tag"] for row in tag_rows]
+
+    async def get_favorites_count_for_article_by_slug(self, *, slug: str) -> int:
+        return (
+            await queries.get_favorites_count_for_article(self.connection, slug=slug)
+        )["favorites_count"]
+
+    async def is_article_favorited_by_user(self, *, slug: str, user: User) -> bool:
+        return (
+            await queries.is_article_in_favorites(
+                self.connection,
+                username=user.username,
+                slug=slug,
+            )
+        )["favorited"]
+
+    async def add_article_into_favorites(self, *, article: Article, user: User) -> None:
+        await queries.add_article_to_favorites(
+            self.connection,
+            username=user.username,
+            slug=article.slug,
+        )
+
+    async def remove_article_from_favorites(
+        self,
+        *,
+        article: Article,
+        user: User,
+    ) -> None:
+        await queries.remove_article_from_favorites(
+            self.connection,
+            username=user.username,
+            slug=article.slug,
+        )
+
+    def _build_articles_filters_query(  # noqa: WPS210
+        self,
+        *,
+        tag: Optional[str],
+        author: Optional[str],
+        favorited: Optional[str],
+    ) -> Tuple[QueryBuilder, List[Union[str, int]], int]:
+        query_params: List[Union[str, int]] = []
+        query_params_count = 0
+
+        query = Query.from_(articles)
 
         if tag:
             query_params.append(tag)
@@ -194,102 +335,7 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             )
             # fmt: on
 
-        query = query.limit(Parameter(query_params_count + 1)).offset(
-            Parameter(query_params_count + 2),
-        )
-        query_params.extend([limit, offset])
-
-        articles_rows = await self.connection.fetch(query.get_sql(), *query_params)
-
-        return [
-            await self._get_article_from_db_record(
-                article_row=article_row,
-                slug=article_row[SLUG_ALIAS],
-                author_username=article_row[AUTHOR_USERNAME_ALIAS],
-                requested_user=requested_user,
-            )
-            for article_row in articles_rows
-        ]
-
-    async def get_articles_for_user_feed(
-        self,
-        *,
-        user: User,
-        limit: int = 20,
-        offset: int = 0,
-    ) -> List[Article]:
-        articles_rows = await queries.get_articles_for_feed(
-            self.connection,
-            follower_username=user.username,
-            limit=limit,
-            offset=offset,
-        )
-        return [
-            await self._get_article_from_db_record(
-                article_row=article_row,
-                slug=article_row[SLUG_ALIAS],
-                author_username=article_row[AUTHOR_USERNAME_ALIAS],
-                requested_user=user,
-            )
-            for article_row in articles_rows
-        ]
-
-    async def get_article_by_slug(
-        self,
-        *,
-        slug: str,
-        requested_user: Optional[User] = None,
-    ) -> Article:
-        article_row = await queries.get_article_by_slug(self.connection, slug=slug)
-        if article_row:
-            return await self._get_article_from_db_record(
-                article_row=article_row,
-                slug=article_row[SLUG_ALIAS],
-                author_username=article_row[AUTHOR_USERNAME_ALIAS],
-                requested_user=requested_user,
-            )
-
-        raise EntityDoesNotExist("article with slug {0} does not exist".format(slug))
-
-    async def get_tags_for_article_by_slug(self, *, slug: str) -> List[str]:
-        tag_rows = await queries.get_tags_for_article_by_slug(
-            self.connection,
-            slug=slug,
-        )
-        return [row["tag"] for row in tag_rows]
-
-    async def get_favorites_count_for_article_by_slug(self, *, slug: str) -> int:
-        return (
-            await queries.get_favorites_count_for_article(self.connection, slug=slug)
-        )["favorites_count"]
-
-    async def is_article_favorited_by_user(self, *, slug: str, user: User) -> bool:
-        return (
-            await queries.is_article_in_favorites(
-                self.connection,
-                username=user.username,
-                slug=slug,
-            )
-        )["favorited"]
-
-    async def add_article_into_favorites(self, *, article: Article, user: User) -> None:
-        await queries.add_article_to_favorites(
-            self.connection,
-            username=user.username,
-            slug=article.slug,
-        )
-
-    async def remove_article_from_favorites(
-        self,
-        *,
-        article: Article,
-        user: User,
-    ) -> None:
-        await queries.remove_article_from_favorites(
-            self.connection,
-            username=user.username,
-            slug=article.slug,
-        )
+        return query, query_params, query_params_count
 
     async def _get_article_from_db_record(
         self,
