@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from starlette import status
 
-from app.api.dependencies.articles import get_article_by_slug_from_path
+from app.api.dependencies.articles import (
+    get_article_by_slug_from_path,
+    get_my_articles_filters,
+)
 from app.api.dependencies.authentication import get_current_user_authorizer
 from app.api.dependencies.database import get_repository
 from app.db.repositories.articles import ArticlesRepository
@@ -12,6 +15,7 @@ from app.models.schemas.articles import (
     DEFAULT_ARTICLES_OFFSET,
     ArticleForResponse,
     ArticleInResponse,
+    ArticlesMyFilters,
     ListOfArticlesInResponse,
 )
 from app.resources import strings
@@ -37,6 +41,32 @@ async def get_articles_for_user_feed(
     )
     articles_for_response = [
         ArticleForResponse(**article.dict()) for article in articles
+    ]
+    return ListOfArticlesInResponse(
+        articles=articles_for_response,
+        articles_count=len(articles),
+    )
+
+
+@router.get(
+    "/me",
+    response_model=ListOfArticlesInResponse,
+    name="articles:list-my-articles",
+)
+async def list_articles_for_current_user(
+    articles_filters: ArticlesMyFilters = Depends(get_my_articles_filters),
+    user: User = Depends(get_current_user_authorizer()),
+    articles_repo: ArticlesRepository = Depends(get_repository(ArticlesRepository)),
+) -> ListOfArticlesInResponse:
+    articles = await articles_repo.get_articles_for_user(
+        user=user,
+        tag=articles_filters.tag,
+        favorited=articles_filters.favorited,
+        limit=articles_filters.limit,
+        offset=articles_filters.offset,
+    )
+    articles_for_response = [
+        ArticleForResponse.from_orm(article) for article in articles
     ]
     return ListOfArticlesInResponse(
         articles=articles_for_response,

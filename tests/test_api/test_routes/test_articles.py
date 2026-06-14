@@ -573,3 +573,202 @@ async def test_filtering_with_limit_and_offset(
 
     articles_from_response = ListOfArticlesInResponse(**response.json())
     assert full_articles.articles[3:] == articles_from_response.articles
+
+
+async def test_user_can_retrieve_only_his_own_articles(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        other_author = await users_repo.create_user(
+            username="other", email="other@email.com", password="password"
+        )
+        for i in range(3):
+            await articles_repo.create_article(
+                slug=f"mine-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+        for i in range(5):
+            await articles_repo.create_article(
+                slug=f"other-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=other_author,
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles")
+    )
+
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == 3
+    assert all(
+        article.author.username == test_user.username for article in articles.articles
+    )
+
+
+async def test_my_articles_is_empty_when_user_has_no_articles(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        other_author = await users_repo.create_user(
+            username="other", email="other@email.com", password="password"
+        )
+        for i in range(3):
+            await articles_repo.create_article(
+                slug=f"other-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=other_author,
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles")
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles == []
+    assert articles.articles_count == 0
+
+
+async def test_my_articles_with_limit_and_offset(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        for i in range(5, 10):
+            await articles_repo.create_article(
+                slug=f"slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+
+    full_response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles")
+    )
+    full_articles = ListOfArticlesInResponse(**full_response.json())
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles"),
+        params={"limit": 2, "offset": 3},
+    )
+
+    articles_from_response = ListOfArticlesInResponse(**response.json())
+    assert full_articles.articles[3:] == articles_from_response.articles
+
+
+@pytest.mark.parametrize(
+    "tag, result", (("", 3), ("tag1", 1), ("tag2", 2), ("wrong", 0))
+)
+async def test_my_articles_filtering_by_tag(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+    tag: str,
+    result: int,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        await articles_repo.create_article(
+            slug="slug-1",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["tag1", "tag2"],
+        )
+        await articles_repo.create_article(
+            slug="slug-2",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["tag2"],
+        )
+        await articles_repo.create_article(
+            slug="slug-3",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["tag3"],
+        )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles"), params={"tag": tag}
+    )
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == result
+
+
+@pytest.mark.parametrize(
+    "favorited, result", (("", 2), ("fan1", 1), ("fan2", 2), ("wrong", 0))
+)
+async def test_my_articles_filtering_by_favorited(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+    favorited: str,
+    result: int,
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        fan1 = await users_repo.create_user(
+            username="fan1", email="fan1@email.com", password="password"
+        )
+        fan2 = await users_repo.create_user(
+            username="fan2", email="fan2@email.com", password="password"
+        )
+
+        article1 = await articles_repo.create_article(
+            slug="slug-1", title="tmp", description="tmp", body="tmp", author=test_user
+        )
+        article2 = await articles_repo.create_article(
+            slug="slug-2", title="tmp", description="tmp", body="tmp", author=test_user
+        )
+
+        await articles_repo.add_article_into_favorites(article=article1, user=fan1)
+        await articles_repo.add_article_into_favorites(article=article1, user=fan2)
+        await articles_repo.add_article_into_favorites(article=article2, user=fan2)
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-my-articles"),
+        params={"favorited": favorited},
+    )
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == result
+
+
+async def test_my_articles_forbidden_for_unauthorized_user(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    response = await client.get(app.url_path_for("articles:list-my-articles"))
+    assert response.status_code == status.HTTP_403_FORBIDDEN

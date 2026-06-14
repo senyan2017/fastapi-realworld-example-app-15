@@ -13,6 +13,7 @@ from app.models.schemas.articles import (
     DEFAULT_ARTICLES_LIMIT,
     DEFAULT_ARTICLES_OFFSET,
     ArticlesFilters,
+    ArticlesMyFilters,
 )
 from app.resources import strings
 from app.services.articles import check_user_can_modify_article
@@ -28,6 +29,20 @@ def get_articles_filters(
     return ArticlesFilters(
         tag=tag,
         author=author,
+        favorited=favorited,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def get_my_articles_filters(
+    tag: Optional[str] = None,
+    favorited: Optional[str] = None,
+    limit: int = Query(DEFAULT_ARTICLES_LIMIT, ge=1),
+    offset: int = Query(DEFAULT_ARTICLES_OFFSET, ge=0),
+) -> ArticlesMyFilters:
+    return ArticlesMyFilters(
+        tag=tag,
         favorited=favorited,
         limit=limit,
         offset=offset,

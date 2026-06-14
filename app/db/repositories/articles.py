@@ -234,6 +234,24 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             for article_row in articles_rows
         ]
 
+    async def get_articles_for_user(
+        self,
+        *,
+        user: User,
+        tag: Optional[str] = None,
+        favorited: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[Article]:
+        return await self.filter_articles(
+            tag=tag,
+            author=user.username,
+            favorited=favorited,
+            limit=limit,
+            offset=offset,
+            requested_user=user,
+        )
+
     async def get_article_by_slug(
         self,
         *,
