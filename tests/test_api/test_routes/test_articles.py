@@ -573,3 +573,178 @@ async def test_filtering_with_limit_and_offset(
 
     articles_from_response = ListOfArticlesInResponse(**response.json())
     assert full_articles.articles[3:] == articles_from_response.articles
+
+
+# --- tests for GET /articles/mine ---
+
+
+async def test_unauthenticated_user_can_not_access_my_articles(
+    app: FastAPI, client: AsyncClient
+) -> None:
+    response = await client.get(app.url_path_for("articles:get-my-articles"))
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+async def test_my_articles_returns_empty_list_when_no_articles(
+    app: FastAPI, authorized_client: AsyncClient, test_user: UserInDB
+) -> None:
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles")
+    )
+    assert response.status_code == status.HTTP_200_OK
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles == []
+    assert articles.articles_count == 0
+
+
+async def test_my_articles_returns_only_own_articles(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        other_user = await users_repo.create_user(
+            username="other", email="other@email.com", password="password"
+        )
+
+        for i in range(3):
+            await articles_repo.create_article(
+                slug=f"mine-slug-{i}",
+                title="mine",
+                description="mine",
+                body="mine",
+                author=test_user,
+                tags=["my-tag"],
+            )
+
+        for i in range(2):
+            await articles_repo.create_article(
+                slug=f"other-slug-{i}",
+                title="other",
+                description="other",
+                body="other",
+                author=other_user,
+                tags=["other-tag"],
+            )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles")
+    )
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == 3
+    assert all(
+        article.author.username == test_user.username
+        for article in articles.articles
+    )
+
+
+async def test_my_articles_with_limit_and_offset(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+        for i in range(5):
+            await articles_repo.create_article(
+                slug=f"paginated-slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+
+    full_response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles")
+    )
+    full_articles = ListOfArticlesInResponse(**full_response.json())
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles"),
+        params={"limit": 2, "offset": 3},
+    )
+    articles_from_response = ListOfArticlesInResponse(**response.json())
+    assert full_articles.articles[3:] == articles_from_response.articles
+
+
+async def test_my_articles_filtering_by_tag(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+        await articles_repo.create_article(
+            slug="tagged-mine-1",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["python", "fastapi"],
+        )
+        await articles_repo.create_article(
+            slug="tagged-mine-2",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["python"],
+        )
+        await articles_repo.create_article(
+            slug="tagged-mine-3",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+            tags=["docker"],
+        )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles"),
+        params={"tag": "python"},
+    )
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == 2
+
+
+async def test_my_articles_filtering_by_favorited(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        article1 = await articles_repo.create_article(
+            slug="fav-mine-1",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+        )
+        await articles_repo.create_article(
+            slug="fav-mine-2",
+            title="tmp",
+            description="tmp",
+            body="tmp",
+            author=test_user,
+        )
+
+        await articles_repo.add_article_into_favorites(
+            article=article1, user=test_user
+        )
+
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-my-articles"),
+        params={"favorited": test_user.username},
+    )
+    articles = ListOfArticlesInResponse(**response.json())
+    assert articles.articles_count == 1
+    assert articles.articles[0].favorited is True

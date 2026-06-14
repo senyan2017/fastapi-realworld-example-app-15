@@ -34,6 +34,20 @@ def get_articles_filters(
     )
 
 
+def get_my_articles_filters(
+    tag: Optional[str] = None,
+    favorited: Optional[str] = None,
+    limit: int = Query(DEFAULT_ARTICLES_LIMIT, ge=1),
+    offset: int = Query(DEFAULT_ARTICLES_OFFSET, ge=0),
+) -> ArticlesFilters:
+    return ArticlesFilters(
+        tag=tag,
+        favorited=favorited,
+        limit=limit,
+        offset=offset,
+    )
+
+
 async def get_article_by_slug_from_path(
     slug: str = Path(..., min_length=1),
     user: Optional[User] = Depends(get_current_user_authorizer(required=False)),
