@@ -10,11 +10,11 @@ from app.models.domain.users import User
 from app.models.schemas.articles import (
     DEFAULT_ARTICLES_LIMIT,
     DEFAULT_ARTICLES_OFFSET,
-    ArticleForResponse,
     ArticleInResponse,
     ListOfArticlesInResponse,
 )
 from app.resources import strings
+from app.services.articles import favorite_article, unfavorite_article
 
 router = APIRouter()
 
@@ -35,13 +35,7 @@ async def get_articles_for_user_feed(
         limit=limit,
         offset=offset,
     )
-    articles_for_response = [
-        ArticleForResponse(**article.dict()) for article in articles
-    ]
-    return ListOfArticlesInResponse(
-        articles=articles_for_response,
-        articles_count=len(articles),
-    )
+    return ListOfArticlesInResponse.from_articles(articles)
 
 
 @router.post(
@@ -54,24 +48,18 @@ async def mark_article_as_favorite(
     user: User = Depends(get_current_user_authorizer()),
     articles_repo: ArticlesRepository = Depends(get_repository(ArticlesRepository)),
 ) -> ArticleInResponse:
-    if not article.favorited:
-        await articles_repo.add_article_into_favorites(article=article, user=user)
-
-        return ArticleInResponse(
-            article=ArticleForResponse.from_orm(
-                article.copy(
-                    update={
-                        "favorited": True,
-                        "favorites_count": article.favorites_count + 1,
-                    },
-                ),
-            ),
+    if article.favorited:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=strings.ARTICLE_IS_ALREADY_FAVORITED,
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=strings.ARTICLE_IS_ALREADY_FAVORITED,
+    favorited_article = await favorite_article(
+        article=article,
+        user=user,
+        articles_repo=articles_repo,
     )
+    return ArticleInResponse.from_article(favorited_article)
 
 
 @router.delete(
@@ -84,21 +72,15 @@ async def remove_article_from_favorites(
     user: User = Depends(get_current_user_authorizer()),
     articles_repo: ArticlesRepository = Depends(get_repository(ArticlesRepository)),
 ) -> ArticleInResponse:
-    if article.favorited:
-        await articles_repo.remove_article_from_favorites(article=article, user=user)
-
-        return ArticleInResponse(
-            article=ArticleForResponse.from_orm(
-                article.copy(
-                    update={
-                        "favorited": False,
-                        "favorites_count": article.favorites_count - 1,
-                    },
-                ),
-            ),
+    if not article.favorited:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=strings.ARTICLE_IS_NOT_FAVORITED,
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=strings.ARTICLE_IS_NOT_FAVORITED,
+    unfavorited_article = await unfavorite_article(
+        article=article,
+        user=user,
+        articles_repo=articles_repo,
     )
+    return ArticleInResponse.from_article(unfavorited_article)

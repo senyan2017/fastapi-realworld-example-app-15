@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,10 @@ class ArticleForResponse(RWSchema, Article):
 
 class ArticleInResponse(RWSchema):
     article: ArticleForResponse
+
+    @classmethod
+    def from_article(cls, article: Article) -> "ArticleInResponse":
+        return cls(article=ArticleForResponse.from_orm(article))
 
 
 class ArticleInCreate(RWSchema):
@@ -33,6 +37,16 @@ class ArticleInUpdate(RWSchema):
 class ListOfArticlesInResponse(RWSchema):
     articles: List[ArticleForResponse]
     articles_count: int
+
+    @classmethod
+    def from_articles(
+        cls,
+        articles: Sequence[Article],
+    ) -> "ListOfArticlesInResponse":
+        return cls(
+            articles=[ArticleForResponse.from_orm(article) for article in articles],
+            articles_count=len(articles),
+        )
 
 
 class ArticlesFilters(BaseModel):

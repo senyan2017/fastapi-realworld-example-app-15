@@ -21,3 +21,31 @@ def get_slug_for_article(title: str) -> str:
 
 def check_user_can_modify_article(article: Article, user: User) -> bool:
     return article.author.username == user.username
+
+
+async def favorite_article(
+    article: Article,
+    user: User,
+    articles_repo: ArticlesRepository,
+) -> Article:
+    await articles_repo.add_article_into_favorites(article=article, user=user)
+    return article.copy(
+        update={
+            "favorited": True,
+            "favorites_count": article.favorites_count + 1,
+        },
+    )
+
+
+async def unfavorite_article(
+    article: Article,
+    user: User,
+    articles_repo: ArticlesRepository,
+) -> Article:
+    await articles_repo.remove_article_from_favorites(article=article, user=user)
+    return article.copy(
+        update={
+            "favorited": False,
+            "favorites_count": article.favorites_count - 1,
+        },
+    )
