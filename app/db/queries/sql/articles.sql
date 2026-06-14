@@ -114,3 +114,11 @@ ORDER BY a.created_at
 LIMIT :limit
 OFFSET
 :offset;
+
+
+-- name: count-articles-for-feed^
+SELECT count(*) AS count
+FROM articles a
+         INNER JOIN followers_to_followings f ON
+        f.following_id = a.author_id AND
+        f.follower_id = (SELECT id FROM users WHERE username = :follower_username);

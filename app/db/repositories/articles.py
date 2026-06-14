@@ -1,7 +1,7 @@
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
-from asyncpg import Connection, Record
-from pypika import Query
+from asyncpg import Connection, Record, UniqueViolationError
+from pypika import Query, functions
 
 from app.db.errors import EntityDoesNotExist
 from app.db.queries.queries import queries
@@ -78,15 +78,18 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
         updated_article.description = description or article.description
 
         async with self.connection.transaction():
-            updated_article.updated_at = await queries.update_article(
-                self.connection,
-                slug=article.slug,
-                author_username=article.author.username,
-                new_slug=updated_article.slug,
-                new_title=updated_article.title,
-                new_body=updated_article.body,
-                new_description=updated_article.description,
-            )
+            try:
+                updated_article.updated_at = await queries.update_article(
+                    self.connection,
+                    slug=article.slug,
+                    author_username=article.author.username,
+                    new_slug=updated_article.slug,
+                    new_title=updated_article.title,
+                    new_body=updated_article.body,
+                    new_description=updated_article.description,
+                )
+            except UniqueViolationError:
+                raise
 
         return updated_article
 
@@ -98,39 +101,19 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
                 author_username=article.author.username,
             )
 
-    async def filter_articles(  # noqa: WPS211
+    def _build_filtered_articles_query(  # noqa: WPS211
         self,
         *,
         tag: Optional[str] = None,
         author: Optional[str] = None,
         favorited: Optional[str] = None,
-        limit: int = 20,
-        offset: int = 0,
-        requested_user: Optional[User] = None,
-    ) -> List[Article]:
+    ) -> Tuple:
         query_params: List[Union[str, int]] = []
         query_params_count = 0
 
         # fmt: off
         query = Query.from_(
             articles,
-        ).select(
-            articles.id,
-            articles.slug,
-            articles.title,
-            articles.description,
-            articles.body,
-            articles.created_at,
-            articles.updated_at,
-            Query.from_(
-                users,
-            ).where(
-                users.id == articles.author_id,
-            ).select(
-                users.username,
-            ).as_(
-                AUTHOR_USERNAME_ALIAS,
-            ),
         )
         # fmt: on
 
@@ -194,6 +177,45 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             )
             # fmt: on
 
+        return query, query_params, query_params_count
+
+    async def filter_articles(  # noqa: WPS211
+        self,
+        *,
+        tag: Optional[str] = None,
+        author: Optional[str] = None,
+        favorited: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+        requested_user: Optional[User] = None,
+    ) -> List[Article]:
+        base_query, query_params, query_params_count = (
+            self._build_filtered_articles_query(
+                tag=tag, author=author, favorited=favorited,
+            )
+        )
+
+        # fmt: off
+        query = base_query.select(
+            articles.id,
+            articles.slug,
+            articles.title,
+            articles.description,
+            articles.body,
+            articles.created_at,
+            articles.updated_at,
+            Query.from_(
+                users,
+            ).where(
+                users.id == articles.author_id,
+            ).select(
+                users.username,
+            ).as_(
+                AUTHOR_USERNAME_ALIAS,
+            ),
+        )
+        # fmt: on
+
         query = query.limit(Parameter(query_params_count + 1)).offset(
             Parameter(query_params_count + 2),
         )
@@ -210,6 +232,23 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             )
             for article_row in articles_rows
         ]
+
+    async def count_articles(  # noqa: WPS211
+        self,
+        *,
+        tag: Optional[str] = None,
+        author: Optional[str] = None,
+        favorited: Optional[str] = None,
+    ) -> int:
+        base_query, query_params, _ = self._build_filtered_articles_query(
+            tag=tag, author=author, favorited=favorited,
+        )
+
+        count_query = base_query.select(functions.Count(articles.id).as_("count"))
+        count_row = await self.connection.fetchrow(
+            count_query.get_sql(), *query_params,
+        )
+        return count_row["count"]
 
     async def get_articles_for_user_feed(
         self,
@@ -233,6 +272,17 @@ class ArticlesRepository(BaseRepository):  # noqa: WPS214
             )
             for article_row in articles_rows
         ]
+
+    async def count_articles_for_user_feed(
+        self,
+        *,
+        user: User,
+    ) -> int:
+        count_row = await queries.count_articles_for_feed(
+            self.connection,
+            follower_username=user.username,
+        )
+        return count_row["count"]
 
     async def get_article_by_slug(
         self,

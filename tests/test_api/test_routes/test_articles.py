@@ -573,3 +573,213 @@ async def test_filtering_with_limit_and_offset(
 
     articles_from_response = ListOfArticlesInResponse(**response.json())
     assert full_articles.articles[3:] == articles_from_response.articles
+
+
+async def test_articles_count_reflects_total_not_page_size(
+    app: FastAPI, authorized_client: AsyncClient, test_user: UserInDB, pool: Pool
+) -> None:
+    """articles_count must be total matching articles, not len(current page)."""
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        for i in range(10):
+            await articles_repo.create_article(
+                slug=f"slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+            )
+
+    # Request only 3 items with offset 0
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"limit": 3, "offset": 0},
+    )
+    articles_response = ListOfArticlesInResponse(**response.json())
+    assert len(articles_response.articles) == 3
+    assert articles_response.articles_count == 10
+
+    # Request page 2 (offset=3, limit=3)
+    response_page2 = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"limit": 3, "offset": 3},
+    )
+    articles_page2 = ListOfArticlesInResponse(**response_page2.json())
+    assert len(articles_page2.articles) == 3
+    assert articles_page2.articles_count == 10
+
+    # Request beyond all items
+    response_beyond = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"limit": 3, "offset": 10},
+    )
+    articles_beyond = ListOfArticlesInResponse(**response_beyond.json())
+    assert len(articles_beyond.articles) == 0
+    assert articles_beyond.articles_count == 10
+
+
+async def test_filtered_articles_count_with_pagination(
+    app: FastAPI, authorized_client: AsyncClient, test_user: UserInDB, pool: Pool
+) -> None:
+    """articles_count with filters must reflect total filtered results."""
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        for i in range(8):
+            await articles_repo.create_article(
+                slug=f"tagged-slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+                tags=["shared-tag"],
+            )
+        for i in range(5):
+            await articles_repo.create_article(
+                slug=f"other-slug-{i}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=test_user,
+                tags=["other-tag"],
+            )
+
+    # Filter by shared-tag with limit 3
+    response = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"tag": "shared-tag", "limit": 3, "offset": 0},
+    )
+    articles_response = ListOfArticlesInResponse(**response.json())
+    assert len(articles_response.articles) == 3
+    assert articles_response.articles_count == 8
+
+    # Filter by shared-tag, page 2
+    response_page2 = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"tag": "shared-tag", "limit": 3, "offset": 3},
+    )
+    articles_page2 = ListOfArticlesInResponse(**response_page2.json())
+    assert len(articles_page2.articles) == 3
+    assert articles_page2.articles_count == 8
+
+    # Filter by other-tag
+    response_other = await authorized_client.get(
+        app.url_path_for("articles:list-articles"),
+        params={"tag": "other-tag", "limit": 3, "offset": 0},
+    )
+    articles_other = ListOfArticlesInResponse(**response_other.json())
+    assert len(articles_other.articles) == 3
+    assert articles_other.articles_count == 5
+
+
+async def test_feed_articles_count_reflects_total_not_page_size(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_article: Article,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    """Feed articles_count must be total following articles, not page size."""
+    async with pool.acquire() as connection:
+        users_repo = UsersRepository(connection)
+        profiles_repo = ProfilesRepository(connection)
+        articles_repo = ArticlesRepository(connection)
+
+        user = await users_repo.create_user(
+            username="feed-author", email="feed@email.com", password="password"
+        )
+        await profiles_repo.add_user_into_followers(
+            target_user=user, requested_user=test_user
+        )
+
+        for j in range(10):
+            await articles_repo.create_article(
+                slug=f"feed-slug-{j}",
+                title="tmp",
+                description="tmp",
+                body="tmp",
+                author=user,
+            )
+
+    # First page: limit=3
+    response = await authorized_client.get(
+        app.url_path_for("articles:get-user-feed-articles"),
+        params={"limit": 3, "offset": 0},
+    )
+    feed_response = ListOfArticlesInResponse(**response.json())
+    assert len(feed_response.articles) == 3
+    assert feed_response.articles_count == 10
+
+    # Second page: offset=3, limit=3
+    response_page2 = await authorized_client.get(
+        app.url_path_for("articles:get-user-feed-articles"),
+        params={"limit": 3, "offset": 3},
+    )
+    feed_page2 = ListOfArticlesInResponse(**response_page2.json())
+    assert len(feed_page2.articles) == 3
+    assert feed_page2.articles_count == 10
+
+
+async def test_user_can_not_update_article_to_existing_slug(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_user: UserInDB,
+    pool: Pool,
+) -> None:
+    """Updating title to match another article's slug must return 400."""
+    async with pool.acquire() as connection:
+        articles_repo = ArticlesRepository(connection)
+
+        await articles_repo.create_article(
+            slug="existing-article",
+            title="Existing Article",
+            description="desc",
+            body="body",
+            author=test_user,
+        )
+        await articles_repo.create_article(
+            slug="another-article",
+            title="Another Article",
+            description="desc",
+            body="body",
+            author=test_user,
+        )
+
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug="another-article"),
+        json={"article": {"title": "Existing Article"}},
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+async def test_user_can_update_article_without_changing_title(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_article: Article,
+    pool: Pool,
+) -> None:
+    """Updating body/description only should not trigger slug conflict."""
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug=test_article.slug),
+        json={"article": {"body": "updated body", "description": "updated desc"}},
+    )
+    assert response.status_code == status.HTTP_200_OK
+    article = ArticleInResponse(**response.json()).article
+    assert article.body == "updated body"
+    assert article.description == "updated desc"
+    assert article.slug == test_article.slug
+
+
+async def test_user_can_update_title_to_same_slug(
+    app: FastAPI,
+    authorized_client: AsyncClient,
+    test_article: Article,
+    pool: Pool,
+) -> None:
+    """Updating with same title (same slug) should not cause conflict."""
+    response = await authorized_client.put(
+        app.url_path_for("articles:update-article", slug=test_article.slug),
+        json={"article": {"title": test_article.title}},
+    )
+    assert response.status_code == status.HTTP_200_OK

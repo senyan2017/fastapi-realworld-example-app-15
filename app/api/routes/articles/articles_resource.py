@@ -1,5 +1,6 @@
 from typing import Optional
 
+from asyncpg import UniqueViolationError
 from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from starlette import status
 
@@ -41,12 +42,17 @@ async def list_articles(
         offset=articles_filters.offset,
         requested_user=user,
     )
+    articles_count = await articles_repo.count_articles(
+        tag=articles_filters.tag,
+        author=articles_filters.author,
+        favorited=articles_filters.favorited,
+    )
     articles_for_response = [
         ArticleForResponse.from_orm(article) for article in articles
     ]
     return ListOfArticlesInResponse(
         articles=articles_for_response,
-        articles_count=len(articles),
+        articles_count=articles_count,
     )
 
 
@@ -98,11 +104,23 @@ async def update_article_by_slug(
     articles_repo: ArticlesRepository = Depends(get_repository(ArticlesRepository)),
 ) -> ArticleInResponse:
     slug = get_slug_for_article(article_update.title) if article_update.title else None
-    article = await articles_repo.update_article(
-        article=current_article,
-        slug=slug,
-        **article_update.dict(),
-    )
+    if slug and slug != current_article.slug:
+        if await check_article_exists(articles_repo, slug):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=strings.ARTICLE_ALREADY_EXISTS,
+            )
+    try:
+        article = await articles_repo.update_article(
+            article=current_article,
+            slug=slug,
+            **article_update.dict(),
+        )
+    except UniqueViolationError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=strings.ARTICLE_ALREADY_EXISTS,
+        )
     return ArticleInResponse(article=ArticleForResponse.from_orm(article))
 
 
